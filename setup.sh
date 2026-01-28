@@ -59,15 +59,16 @@ echo ""
 # Check for sox (required by qwen-tts)
 echo -e "${GREEN}Checking for SoX...${NC}"
 if ! command -v sox &> /dev/null; then
-    echo -e "${RED}Error: SoX not found${NC}"
+    echo -e "${YELLOW}Warning: SoX not found${NC}"
     echo -e "${YELLOW}SoX is required by qwen-tts for audio processing.${NC}"
-    echo -e "${YELLOW}Please install SoX:${NC}"
+    echo -e "${YELLOW}On RunPod/Docker, train.sh will auto-install it.${NC}"
+    echo -e "${YELLOW}Otherwise, install manually:${NC}"
     echo -e "  Ubuntu/Debian: sudo apt install sox libsox-fmt-all"
     echo -e "  RHEL/CentOS:   sudo yum install sox"
     echo -e "  macOS:         brew install sox"
-    exit 1
+else
+    echo -e "${GREEN}Found: $(sox --version | head -1)${NC}"
 fi
-echo -e "${GREEN}Found: $(sox --version | head -1)${NC}"
 echo ""
 
 # Detect CUDA

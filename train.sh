@@ -2,11 +2,12 @@
 # Qwen3-TTS One-Command Fine-Tuning Script
 #
 # This script provides the complete end-to-end pipeline:
-# 1. Automatically sets up environment if needed
-# 2. Transcribes audio files using WhisperX
-# 3. Creates train_raw.jsonl
-# 4. Prepares data (extracts audio_codes)
-# 5. Fine-tunes the model
+# 1. Checks/installs system dependencies (sox)
+# 2. Automatically sets up Python environment if needed
+# 3. Transcribes audio files using WhisperX
+# 4. Creates train_raw.jsonl
+# 5. Prepares data (extracts audio_codes)
+# 6. Fine-tunes the model
 #
 # Usage:
 #   ./train.sh --audio_dir ./audio --ref_audio ./ref.wav --speaker_name my_voice
@@ -21,6 +22,37 @@ RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
+
+# Function to check and install system dependencies
+check_system_deps() {
+    local missing_deps=()
+
+    # Check for sox
+    if ! command -v sox &> /dev/null; then
+        missing_deps+=("sox")
+    fi
+
+    if [ ${#missing_deps[@]} -gt 0 ]; then
+        echo -e "${YELLOW}Installing system dependencies: ${missing_deps[*]}${NC}"
+
+        # Try to install automatically (works on Debian/Ubuntu-based systems like RunPod)
+        if command -v apt-get &> /dev/null; then
+            apt-get update -qq && apt-get install -y -qq sox libsox-fmt-all 2>/dev/null || {
+                echo -e "${RED}Could not auto-install. Please run manually:${NC}"
+                echo -e "  sudo apt-get install sox libsox-fmt-all"
+                exit 1
+            }
+            echo -e "${GREEN}System dependencies installed${NC}"
+        else
+            echo -e "${RED}Please install system dependencies manually:${NC}"
+            echo -e "  sox libsox-fmt-all"
+            exit 1
+        fi
+    fi
+}
+
+# Check system dependencies first (needed on every RunPod start)
+check_system_deps
 
 # Function to check if environment is ready
 check_environment_ready() {
