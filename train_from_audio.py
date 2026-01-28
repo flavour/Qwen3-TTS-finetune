@@ -332,10 +332,13 @@ class Qwen3TTSPipeline:
         from safetensors.torch import save_file
 
         # Setup accelerator
+        logging_dir = self.output_dir / "logs"
+        logging_dir.mkdir(parents=True, exist_ok=True)
         accelerator = Accelerator(
             gradient_accumulation_steps=4,
             mixed_precision="bf16",
             log_with="tensorboard",
+            project_dir=str(logging_dir),
         )
 
         # Load model with detected attention implementation
