@@ -1,6 +1,6 @@
 # Qwen3-TTS One-Command Fine-Tuning
 
-[![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
+[![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/downloads/)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
 > End-to-end automation for fine-tuning Qwen3-TTS with your own voice samples.
@@ -44,9 +44,15 @@ The pipeline processes your audio through 6 steps:
 
 ### Prerequisites
 
-- Python 3.8+
-- CUDA-capable GPU (recommended, ~16GB memory)
+- Python 3.12
+- CUDA 12.x (for GPU support, ~16GB VRAM recommended)
 - ~10GB disk space for models
+
+### Pinned Versions
+
+The setup uses specific tested versions:
+- **PyTorch:** 2.8.0 (CUDA 12.8)
+- **flash-attn:** 2.8.1 (pre-built wheel for Python 3.12 + CUDA 12 + PyTorch 2.8)
 
 ### One-Command Training
 
@@ -85,11 +91,11 @@ The setup handles all dependencies:
 
 | Category | Packages |
 |----------|----------|
-| **Core ML** | torch, torchaudio, transformers, accelerate |
+| **Core ML** | torch 2.8.0, torchaudio 2.8.0, transformers, accelerate |
 | **TTS** | qwen-tts (Qwen3-TTS models) |
 | **Audio** | librosa, soundfile |
 | **Transcription** | whisperx |
-| **Acceleration** | flash-attn (optional, with fallback) |
+| **Acceleration** | flash-attn 2.8.1 (pre-built wheel, with fallback) |
 | **Utilities** | tqdm, safetensors, datasets, huggingface-hub |
 
 Models are automatically downloaded from HuggingFace on first use:
