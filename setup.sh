@@ -218,8 +218,6 @@ if ! grep -q "HF_HOME" "$VENV_DIR/bin/activate" 2>/dev/null; then
 
 # HuggingFace cache configuration (added by setup.sh)
 export HF_HOME="${VIRTUAL_ENV}/hf_cache"
-export TRANSFORMERS_CACHE="${HF_HOME}/transformers"
-export HF_DATASETS_CACHE="${HF_HOME}/datasets"
 HFEOF
     echo -e "${GREEN}HuggingFace cache configured at $VENV_DIR/hf_cache${NC}"
 else

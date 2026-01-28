@@ -36,9 +36,8 @@ def configure_hf_cache():
     # Only configure if venv exists
     if hf_cache.parent.exists():
         hf_cache.mkdir(parents=True, exist_ok=True)
+        # Only set HF_HOME - let HuggingFace manage subdirectories
         os.environ.setdefault("HF_HOME", str(hf_cache))
-        os.environ.setdefault("TRANSFORMERS_CACHE", str(hf_cache / "transformers"))
-        os.environ.setdefault("HF_DATASETS_CACHE", str(hf_cache / "datasets"))
 
 
 def get_attention_implementation():

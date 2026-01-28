@@ -152,8 +152,6 @@ fi
 
 # Configure HuggingFace cache before activating venv
 export HF_HOME="$VENV_DIR/hf_cache"
-export TRANSFORMERS_CACHE="$HF_HOME/transformers"
-export HF_DATASETS_CACHE="$HF_HOME/datasets"
 
 # Create cache directory if it doesn't exist
 mkdir -p "$HF_HOME"
