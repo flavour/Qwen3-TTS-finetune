@@ -457,10 +457,19 @@ class Qwen3TTSPipeline:
                 output_dir = os.path.join(
                     str(self.output_dir), f"checkpoint-epoch-{epoch}"
                 )
-                shutil.copytree(self.init_model_path, output_dir, dirs_exist_ok=True)
+
+                # Get the actual model path (could be HF cache or local)
+                from huggingface_hub import snapshot_download
+                if os.path.isdir(self.init_model_path):
+                    model_cache_path = self.init_model_path
+                else:
+                    # Download/get cached path for HuggingFace model
+                    model_cache_path = snapshot_download(self.init_model_path)
+
+                shutil.copytree(model_cache_path, output_dir, dirs_exist_ok=True)
 
                 # Update config
-                input_config_file = os.path.join(self.init_model_path, "config.json")
+                input_config_file = os.path.join(model_cache_path, "config.json")
                 output_config_file = os.path.join(output_dir, "config.json")
 
                 with open(input_config_file, "r", encoding="utf-8") as f:
