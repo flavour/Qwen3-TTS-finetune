@@ -420,14 +420,37 @@ class Qwen3TTSPipeline:
                 # Save model weights — merge LoRA if active
                 unwrapped_model = accelerator.unwrap_model(model)
 
-                if self.use_lora and hasattr(unwrapped_model.talker, "merge_and_unload"):
+                if self.use_lora:
                     print("Merging LoRA weights into base model for inference-compatible checkpoint...")
-                    unwrapped_model.talker = unwrapped_model.talker.merge_and_unload()
+                    # Try merge_and_unload on the talker
+                    talker = unwrapped_model.talker
+                    if hasattr(talker, "merge_and_unload"):
+                        merged_talker = talker.merge_and_unload()
+                        unwrapped_model.talker = merged_talker
+                        print("  LoRA merged via merge_and_unload")
+                    else:
+                        print(f"  WARNING: talker type {type(talker)} has no merge_and_unload")
 
                 state_dict = {
                     k: v.detach().to("cpu").to(torch.float32)
                     for k, v in unwrapped_model.state_dict().items()
                 }
+
+                if self.use_lora:
+                    # Clean up any remaining PEFT artifacts in state dict
+                    # Strip 'base_model.model.' prefix that PEFT adds
+                    cleaned = {}
+                    lora_keys_dropped = 0
+                    for k, v in state_dict.items():
+                        if "lora_" in k or "modules_to_save" in k:
+                            lora_keys_dropped += 1
+                            continue
+                        # Strip PEFT prefix: talker.base_model.model.X -> talker.X
+                        new_k = k.replace("talker.base_model.model.", "talker.")
+                        cleaned[new_k] = v
+                    state_dict = cleaned
+                    if lora_keys_dropped:
+                        print(f"  Dropped {lora_keys_dropped} LoRA-specific keys from state dict")
 
                 # Drop speaker encoder keys
                 keys_to_drop = [k for k in state_dict if "speaker_encoder" in k]
