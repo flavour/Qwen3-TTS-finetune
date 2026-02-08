@@ -107,6 +107,15 @@ def train():
     )
 
     num_epochs = args.num_epochs
+    # Get inner talker model, unwrapping PEFT if needed
+    def get_talker_inner(m):
+        talker = m.talker
+        if hasattr(talker, "base_model"):  # PEFT wrapped
+            return talker.base_model.model
+        return talker.model if hasattr(talker, "model") else talker
+
+    talker_inner = get_talker_inner(model)
+
     model.train()
 
     for epoch in range(num_epochs):
@@ -129,14 +138,15 @@ def train():
                 input_text_ids = input_ids[:, :, 0]
                 input_codec_ids = input_ids[:, :, 1]
 
-                input_text_embedding = model.talker.model.text_embedding(input_text_ids) * text_embedding_mask
-                input_codec_embedding = model.talker.model.codec_embedding(input_codec_ids) * codec_embedding_mask
+                input_text_embedding = talker_inner.text_embedding(input_text_ids) * text_embedding_mask
+                input_codec_embedding = talker_inner.codec_embedding(input_codec_ids) * codec_embedding_mask
                 input_codec_embedding[:, 6, :] = speaker_embedding
 
                 input_embeddings = input_text_embedding + input_codec_embedding
 
                 for i in range(1, 16):
-                    codec_i_embedding = model.talker.code_predictor.get_input_embeddings()[i - 1](codec_ids[:, :, i])
+                    talker_for_call = model.talker.base_model.model if hasattr(model.talker, "base_model") else model.talker
+                    codec_i_embedding = talker_for_call.code_predictor.get_input_embeddings()[i - 1](codec_ids[:, :, i])
                     codec_i_embedding = codec_i_embedding * codec_mask.unsqueeze(-1)
                     input_embeddings = input_embeddings + codec_i_embedding
 
@@ -151,7 +161,7 @@ def train():
                 talker_hidden_states = hidden_states[codec_mask[:, 1:]]
                 talker_codec_ids = codec_ids[codec_mask]
 
-                sub_talker_logits, sub_talker_loss = model.talker.forward_sub_talker_finetune(talker_codec_ids, talker_hidden_states)
+                sub_talker_logits, sub_talker_loss = talker_for_call.forward_sub_talker_finetune(talker_codec_ids, talker_hidden_states)
 
                 loss = outputs.loss + sub_talker_loss
 
