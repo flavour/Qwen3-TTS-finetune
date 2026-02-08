@@ -109,10 +109,11 @@ def train():
     num_epochs = args.num_epochs
     # Get inner talker model, unwrapping PEFT if needed
     def get_talker_inner(m):
+        """Chain: talker.model.text_embedding (no PEFT) or talker.base_model.model.model.text_embedding (PEFT)"""
         talker = m.talker
-        if hasattr(talker, "base_model"):  # PEFT wrapped
-            return talker.base_model.model
-        return talker.model if hasattr(talker, "model") else talker
+        if hasattr(talker, "base_model"):
+            return talker.base_model.model.model
+        return talker.model
 
     talker_inner = get_talker_inner(model)
 

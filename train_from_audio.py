@@ -302,11 +302,16 @@ class Qwen3TTSPipeline:
         # When LoRA wraps the talker, attribute access changes.
         # Get the underlying talker model for embedding access.
         def get_talker_inner(m):
-            """Get the inner talker model, unwrapping PEFT if needed."""
+            """Get the inner talker model (with text_embedding), unwrapping PEFT if needed.
+            
+            Chain without PEFT: model.talker.model.text_embedding
+            Chain with PEFT:    model.talker.base_model.model.model.text_embedding
+            """
             talker = m.talker
             if hasattr(talker, "base_model"):  # PEFT wrapped
-                return talker.base_model.model
-            return talker.model if hasattr(talker, "model") else talker
+                # PeftModel -> LoraModel -> Qwen3TTSTalkerForConditionalGeneration -> inner model
+                return talker.base_model.model.model
+            return talker.model
 
         talker_inner = get_talker_inner(model)
 
