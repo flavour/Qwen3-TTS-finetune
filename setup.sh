@@ -67,8 +67,9 @@ uv pip install \
 
 uv pip install \
     qwen-tts \
-    numpy \
-    librosa \
+    "numpy>=1.26,<2" \
+    "numba>=0.60" \
+    "librosa>=0.10.2" \
     soundfile \
     tqdm \
     transformers \
