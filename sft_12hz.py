@@ -201,21 +201,26 @@ def train():
             unwrapped_model = accelerator.unwrap_model(model)
 
             if args.lora:
-                print("Merging LoRA weights...")
+                import copy
+                print("Merging LoRA weights for checkpoint (on a copy)...")
                 talker = unwrapped_model.talker
                 if hasattr(talker, "merge_and_unload"):
-                    unwrapped_model.talker = talker.merge_and_unload()
-
-            state_dict = {k: v.detach().to("cpu") for k, v in unwrapped_model.state_dict().items()}
-
-            if args.lora:
-                cleaned = {}
-                for k, v in state_dict.items():
-                    if "lora_" in k or "modules_to_save" in k:
-                        continue
-                    new_k = k.replace("talker.base_model.model.", "talker.")
-                    cleaned[new_k] = v
-                state_dict = cleaned
+                    talker_copy = copy.deepcopy(talker)
+                    merged = talker_copy.merge_and_unload()
+                    merged_sd = {f"talker.{k}": v.detach().to("cpu") for k, v in merged.state_dict().items()}
+                    other_sd = {k: v.detach().to("cpu") for k, v in unwrapped_model.state_dict().items() if not k.startswith("talker.")}
+                    state_dict = {**other_sd, **merged_sd}
+                    del talker_copy, merged
+                else:
+                    state_dict = {k: v.detach().to("cpu") for k, v in unwrapped_model.state_dict().items()}
+                    cleaned = {}
+                    for k, v in state_dict.items():
+                        if "lora_" in k or "modules_to_save" in k:
+                            continue
+                        cleaned[k.replace("talker.base_model.model.", "talker.")] = v
+                    state_dict = cleaned
+            else:
+                state_dict = {k: v.detach().to("cpu") for k, v in unwrapped_model.state_dict().items()}
 
             keys_to_drop = [k for k in state_dict.keys() if "speaker_encoder" in k]
             for k in keys_to_drop:

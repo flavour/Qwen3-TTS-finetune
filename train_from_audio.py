@@ -421,36 +421,40 @@ class Qwen3TTSPipeline:
                 unwrapped_model = accelerator.unwrap_model(model)
 
                 if self.use_lora:
-                    print("Merging LoRA weights into base model for inference-compatible checkpoint...")
-                    # Try merge_and_unload on the talker
+                    import copy
+                    print("Merging LoRA weights for checkpoint (on a copy)...")
+                    # Deep-copy the talker so we can merge without destroying the training model
                     talker = unwrapped_model.talker
                     if hasattr(talker, "merge_and_unload"):
-                        merged_talker = talker.merge_and_unload()
-                        unwrapped_model.talker = merged_talker
-                        print("  LoRA merged via merge_and_unload")
+                        talker_copy = copy.deepcopy(talker)
+                        merged = talker_copy.merge_and_unload()
+                        # Build state dict from merged talker + rest of model
+                        merged_sd = {f"talker.{k}": v.detach().to("cpu").to(torch.float32)
+                                     for k, v in merged.state_dict().items()}
+                        other_sd = {k: v.detach().to("cpu").to(torch.float32)
+                                    for k, v in unwrapped_model.state_dict().items()
+                                    if not k.startswith("talker.")}
+                        state_dict = {**other_sd, **merged_sd}
+                        del talker_copy, merged
+                        print("  LoRA merged (copy) for checkpoint")
                     else:
-                        print(f"  WARNING: talker type {type(talker)} has no merge_and_unload")
-
-                state_dict = {
-                    k: v.detach().to("cpu").to(torch.float32)
-                    for k, v in unwrapped_model.state_dict().items()
-                }
-
-                if self.use_lora:
-                    # Clean up any remaining PEFT artifacts in state dict
-                    # Strip 'base_model.model.' prefix that PEFT adds
-                    cleaned = {}
-                    lora_keys_dropped = 0
-                    for k, v in state_dict.items():
-                        if "lora_" in k or "modules_to_save" in k:
-                            lora_keys_dropped += 1
-                            continue
-                        # Strip PEFT prefix: talker.base_model.model.X -> talker.X
-                        new_k = k.replace("talker.base_model.model.", "talker.")
-                        cleaned[new_k] = v
-                    state_dict = cleaned
-                    if lora_keys_dropped:
-                        print(f"  Dropped {lora_keys_dropped} LoRA-specific keys from state dict")
+                        # Fallback: strip prefixes manually
+                        state_dict = {
+                            k: v.detach().to("cpu").to(torch.float32)
+                            for k, v in unwrapped_model.state_dict().items()
+                        }
+                        cleaned = {}
+                        for k, v in state_dict.items():
+                            if "lora_" in k or "modules_to_save" in k:
+                                continue
+                            new_k = k.replace("talker.base_model.model.", "talker.")
+                            cleaned[new_k] = v
+                        state_dict = cleaned
+                else:
+                    state_dict = {
+                        k: v.detach().to("cpu").to(torch.float32)
+                        for k, v in unwrapped_model.state_dict().items()
+                    }
 
                 # Drop speaker encoder keys
                 keys_to_drop = [k for k in state_dict if "speaker_encoder" in k]
