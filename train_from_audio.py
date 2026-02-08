@@ -294,7 +294,14 @@ class Qwen3TTSPipeline:
             for line in f:
                 train_data.append(json.loads(line))
 
-        print(f"Training on {len(train_data)} samples")
+        # Train/val split — hold out ~15% for validation (min 1 sample)
+        import random
+        random.seed(42)
+        random.shuffle(train_data)
+        n_val = max(1, len(train_data) // 6)
+        val_data = train_data[:n_val]
+        train_data = train_data[n_val:]
+        print(f"Training on {len(train_data)} samples, validating on {len(val_data)}")
 
         dataset = TTSDataset(train_data, qwen3tts.processor, config)
         train_dataloader = DataLoader(
@@ -304,10 +311,18 @@ class Qwen3TTSPipeline:
             collate_fn=dataset.collate_fn,
         )
 
+        val_dataset = TTSDataset(val_data, qwen3tts.processor, config)
+        val_dataloader = DataLoader(
+            val_dataset,
+            batch_size=self.batch_size,
+            shuffle=False,
+            collate_fn=val_dataset.collate_fn,
+        )
+
         optimizer = AdamW(qwen3tts.model.parameters(), lr=self.lr, weight_decay=0.01)
 
-        model, optimizer, train_dataloader = accelerator.prepare(
-            qwen3tts.model, optimizer, train_dataloader
+        model, optimizer, train_dataloader, val_dataloader = accelerator.prepare(
+            qwen3tts.model, optimizer, train_dataloader, val_dataloader
         )
 
         # When LoRA wraps the talker, attribute access changes.
@@ -426,6 +441,51 @@ class Qwen3TTSPipeline:
                     )
                     global_step = epoch * len(train_dataloader) + step
                     accelerator.log({"loss": loss_val, "epoch": epoch}, step=global_step)
+
+            # Validation loss
+            model.eval()
+            val_losses = []
+            with torch.no_grad():
+                for batch in val_dataloader:
+                    input_ids = batch["input_ids"]
+                    codec_ids = batch["codec_ids"]
+                    ref_mels = batch["ref_mels"]
+                    text_embedding_mask = batch["text_embedding_mask"]
+                    codec_embedding_mask = batch["codec_embedding_mask"]
+                    attention_mask = batch["attention_mask"]
+                    codec_0_labels = batch["codec_0_labels"]
+                    codec_mask = batch["codec_mask"]
+
+                    speaker_embedding = model.speaker_encoder(
+                        ref_mels.to(model.device).to(model.dtype)
+                    ).detach()
+
+                    input_text_ids = input_ids[:, :, 0]
+                    input_codec_ids = input_ids[:, :, 1]
+                    input_text_embedding = talker_inner.text_embedding(input_text_ids) * text_embedding_mask
+                    input_codec_embedding = talker_inner.codec_embedding(input_codec_ids) * codec_embedding_mask
+                    input_codec_embedding[:, 6, :] = speaker_embedding
+                    input_embeddings = input_text_embedding + input_codec_embedding
+
+                    talker_for_val = model.talker.base_model.model if hasattr(model.talker, "base_model") else model.talker
+                    for i in range(1, 16):
+                        codec_i_embedding = talker_for_val.code_predictor.get_input_embeddings()[i - 1](codec_ids[:, :, i])
+                        codec_i_embedding = codec_i_embedding * codec_mask.unsqueeze(-1)
+                        input_embeddings = input_embeddings + codec_i_embedding
+
+                    outputs = model.talker(
+                        inputs_embeds=input_embeddings[:, :-1, :],
+                        attention_mask=attention_mask[:, :-1],
+                        labels=codec_0_labels[:, 1:],
+                        output_hidden_states=True,
+                    )
+                    val_losses.append(outputs.loss.item())
+
+            avg_val_loss = sum(val_losses) / len(val_losses) if val_losses else 0
+            global_step = (epoch + 1) * len(train_dataloader)
+            accelerator.log({"val_loss": avg_val_loss, "epoch": epoch}, step=global_step)
+            accelerator.print(f"Epoch {epoch} | Val Loss: {avg_val_loss:.4f}")
+            model.train()
 
             # Save checkpoint
             if accelerator.is_main_process:
