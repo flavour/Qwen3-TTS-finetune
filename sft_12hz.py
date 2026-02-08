@@ -199,6 +199,11 @@ def train():
                 json.dump(config_dict, f, indent=2, ensure_ascii=False)
 
             unwrapped_model = accelerator.unwrap_model(model)
+
+            if args.lora and hasattr(unwrapped_model.talker, "merge_and_unload"):
+                print("Merging LoRA weights into base model...")
+                unwrapped_model.talker = unwrapped_model.talker.merge_and_unload()
+
             state_dict = {k: v.detach().to("cpu") for k, v in unwrapped_model.state_dict().items()}
 
             keys_to_drop = [k for k in state_dict.keys() if "speaker_encoder" in k]

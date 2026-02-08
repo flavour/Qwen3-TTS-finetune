@@ -417,8 +417,13 @@ class Qwen3TTSPipeline:
                 with open(config_file, "w", encoding="utf-8") as f:
                     json.dump(config_dict, f, indent=2, ensure_ascii=False)
 
-                # Save model weights
+                # Save model weights — merge LoRA if active
                 unwrapped_model = accelerator.unwrap_model(model)
+
+                if self.use_lora and hasattr(unwrapped_model.talker, "merge_and_unload"):
+                    print("Merging LoRA weights into base model for inference-compatible checkpoint...")
+                    unwrapped_model.talker = unwrapped_model.talker.merge_and_unload()
+
                 state_dict = {
                     k: v.detach().to("cpu").to(torch.float32)
                     for k, v in unwrapped_model.state_dict().items()
