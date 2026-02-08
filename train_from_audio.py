@@ -244,14 +244,9 @@ class Qwen3TTSPipeline:
 
         # Configure loggers
         log_with = ["tensorboard"]
-        init_kwargs = {}
         if self.mlflow_url:
             log_with.append("mlflow")
             os.environ["MLFLOW_TRACKING_URI"] = self.mlflow_url
-            init_kwargs["mlflow"] = {
-                "experiment_name": self.mlflow_experiment,
-                "run_name": f"{self.speaker_name}-{self.num_epochs}ep" + ("-lora" if self.use_lora else ""),
-            }
 
         accelerator = Accelerator(
             gradient_accumulation_steps=4,
@@ -332,6 +327,11 @@ class Qwen3TTSPipeline:
         talker_inner = get_talker_inner(model)
 
         # Initialize trackers (MLflow, tensorboard)
+        tracker_init_kwargs = {}
+        if self.mlflow_url:
+            tracker_init_kwargs["mlflow"] = {
+                "run_name": f"{self.speaker_name}-{self.num_epochs}ep" + ("-lora" if self.use_lora else ""),
+            }
         accelerator.init_trackers(
             self.mlflow_experiment if self.mlflow_url else "tts-finetune",
             config={
@@ -345,7 +345,7 @@ class Qwen3TTSPipeline:
                 "num_samples": len(train_data),
                 "model": self.init_model_path,
             },
-            init_kwargs=init_kwargs if self.mlflow_url else {},
+            init_kwargs=tracker_init_kwargs,
         )
 
         target_speaker_embedding = None
