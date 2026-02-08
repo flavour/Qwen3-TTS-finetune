@@ -70,6 +70,7 @@ class Qwen3TTSPipeline:
         lora_rank: int = 16,
         lora_alpha: int = 32,
         gradient_checkpointing: bool = False,
+        warmup_steps: int = 50,
         mlflow_url: str | None = None,
         mlflow_experiment: str = "qwen3-tts-finetune",
     ):
@@ -92,6 +93,7 @@ class Qwen3TTSPipeline:
         self.lora_rank = lora_rank
         self.lora_alpha = lora_alpha
         self.gradient_checkpointing = gradient_checkpointing
+        self.warmup_steps = warmup_steps
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.train_raw_jsonl = self.output_dir / "train_raw.jsonl"
         self.train_with_codes_jsonl = self.output_dir / "train_with_codes.jsonl"
@@ -321,8 +323,23 @@ class Qwen3TTSPipeline:
 
         optimizer = AdamW(qwen3tts.model.parameters(), lr=self.lr, weight_decay=0.01)
 
-        model, optimizer, train_dataloader, val_dataloader = accelerator.prepare(
-            qwen3tts.model, optimizer, train_dataloader, val_dataloader
+        # LR scheduler: linear warmup then cosine decay
+        total_steps = len(train_dataloader) * self.num_epochs
+        warmup_steps = min(self.warmup_steps, total_steps // 5)
+        from torch.optim.lr_scheduler import LambdaLR
+        import math
+
+        def lr_lambda(current_step):
+            if current_step < warmup_steps:
+                return float(current_step) / float(max(1, warmup_steps))
+            progress = float(current_step - warmup_steps) / float(max(1, total_steps - warmup_steps))
+            return max(0.1, 0.5 * (1.0 + math.cos(math.pi * progress)))
+
+        scheduler = LambdaLR(optimizer, lr_lambda)
+        print(f"LR schedule: {warmup_steps} warmup steps, {total_steps} total steps, cosine decay to 10% of peak")
+
+        model, optimizer, train_dataloader, val_dataloader, scheduler = accelerator.prepare(
+            qwen3tts.model, optimizer, train_dataloader, val_dataloader, scheduler
         )
 
         # When LoRA wraps the talker, attribute access changes.
@@ -432,12 +449,13 @@ class Qwen3TTSPipeline:
                         accelerator.clip_grad_norm_(model.parameters(), 1.0)
 
                     optimizer.step()
+                    scheduler.step()
                     optimizer.zero_grad()
 
                 if step % 10 == 0:
                     loss_val = loss.item()
                     accelerator.print(
-                        f"Epoch {epoch} | Step {step} | Loss: {loss_val:.4f}"
+                        f"Epoch {epoch} | Step {step} | Loss: {loss_val:.4f} | LR: {scheduler.get_last_lr()[0]:.2e}"
                     )
                     global_step = epoch * len(train_dataloader) + step
                     accelerator.log({"loss": loss_val, "epoch": epoch}, step=global_step)
@@ -608,6 +626,7 @@ def main():
     parser.add_argument("--init_model_path", type=str, default="Qwen/Qwen3-TTS-12Hz-1.7B-Base")
     parser.add_argument("--batch_size", type=int, default=2, help="Batch size")
     parser.add_argument("--lr", type=float, default=2e-5, help="Learning rate")
+    parser.add_argument("--warmup_steps", type=int, default=50, help="LR warmup steps (cosine schedule)")
     parser.add_argument("--num_epochs", type=int, default=3, help="Epochs")
     parser.add_argument("--language", type=str, default="en", help="Language code")
     parser.add_argument("--mlflow_url", type=str, default=None, help="MLflow tracking server URL")
@@ -633,6 +652,7 @@ def main():
         init_model_path=args.init_model_path,
         batch_size=args.batch_size,
         lr=args.lr,
+        warmup_steps=args.warmup_steps,
         num_epochs=args.num_epochs,
         language=args.language,
         mlflow_url=args.mlflow_url,
