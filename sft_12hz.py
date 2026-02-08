@@ -201,13 +201,16 @@ def train():
             unwrapped_model = accelerator.unwrap_model(model)
             state_dict = {k: v.detach().to("cpu") for k, v in unwrapped_model.state_dict().items()}
 
-            drop_prefix = "speaker_encoder"
-            keys_to_drop = [k for k in state_dict.keys() if k.startswith(drop_prefix)]
+            keys_to_drop = [k for k in state_dict.keys() if "speaker_encoder" in k]
             for k in keys_to_drop:
                 del state_dict[k]
 
-            weight = state_dict['talker.model.codec_embedding.weight']
-            state_dict['talker.model.codec_embedding.weight'][3000] = target_speaker_embedding[0].detach().to(weight.device).to(weight.dtype)
+            codec_emb_key = next((k for k in state_dict if k.endswith("codec_embedding.weight")), None)
+            if codec_emb_key:
+                weight = state_dict[codec_emb_key]
+                state_dict[codec_emb_key][3000] = target_speaker_embedding[0].detach().to(weight.device).to(weight.dtype)
+            else:
+                print("WARNING: codec_embedding.weight not found in state_dict")
             save_path = os.path.join(output_dir, "model.safetensors")
             save_file(state_dict, save_path)
 

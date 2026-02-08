@@ -425,15 +425,25 @@ class Qwen3TTSPipeline:
                 }
 
                 # Drop speaker encoder keys
-                keys_to_drop = [k for k in state_dict if k.startswith("speaker_encoder")]
+                keys_to_drop = [k for k in state_dict if "speaker_encoder" in k]
                 for k in keys_to_drop:
                     del state_dict[k]
 
-                # Add speaker embedding
-                weight = state_dict["talker.model.codec_embedding.weight"]
-                state_dict["talker.model.codec_embedding.weight"][3000] = (
-                    target_speaker_embedding[0].detach().to(weight.device).to(weight.dtype)
-                )
+                # Find the codec_embedding key (PEFT may prefix with base_model.model.)
+                codec_emb_key = None
+                for k in state_dict:
+                    if k.endswith("codec_embedding.weight"):
+                        codec_emb_key = k
+                        break
+                if codec_emb_key is None:
+                    print("WARNING: codec_embedding.weight not found in state_dict, skipping speaker embedding injection")
+                    print(f"  Available keys (first 20): {list(state_dict.keys())[:20]}")
+                else:
+                    # Add speaker embedding
+                    weight = state_dict[codec_emb_key]
+                    state_dict[codec_emb_key][3000] = (
+                        target_speaker_embedding[0].detach().to(weight.device).to(weight.dtype)
+                    )
 
                 save_file(state_dict, os.path.join(output_dir, "model.safetensors"))
                 print(f"Saved checkpoint to {output_dir}")
