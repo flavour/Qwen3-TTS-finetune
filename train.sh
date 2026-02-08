@@ -71,6 +71,8 @@ while [[ $# -gt 0 ]]; do
         --lora)          LORA=true; shift ;;
         --lora_rank)     LORA_RANK="$2"; shift 2 ;;
         --gradient_checkpointing) GRAD_CKPT=true; shift ;;
+        --mlflow_url)    MLFLOW_URL="$2"; shift 2 ;;
+        --mlflow_experiment) MLFLOW_EXP="$2"; shift 2 ;;
         --help)
             echo "Qwen3-TTS Fine-Tuning"
             echo ""
@@ -154,6 +156,8 @@ else
     CMD="$CMD --audio_dir \"$AUDIO_DIR\""
 fi
 
+[ -n "${MLFLOW_URL:-}" ] && CMD="$CMD --mlflow_url \"$MLFLOW_URL\""
+[ -n "${MLFLOW_EXP:-}" ] && CMD="$CMD --mlflow_experiment \"$MLFLOW_EXP\""
 [ "${LORA:-}" = true ] && CMD="$CMD --lora"
 [ -n "${LORA_RANK:-}" ] && CMD="$CMD --lora_rank $LORA_RANK"
 [ "${GRAD_CKPT:-}" = true ] && CMD="$CMD --gradient_checkpointing"

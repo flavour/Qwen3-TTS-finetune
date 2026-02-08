@@ -70,6 +70,8 @@ class Qwen3TTSPipeline:
         lora_rank: int = 16,
         lora_alpha: int = 32,
         gradient_checkpointing: bool = False,
+        mlflow_url: str | None = None,
+        mlflow_experiment: str = "qwen3-tts-finetune",
     ):
         self.ref_audio = Path(ref_audio)
         self.speaker_name = speaker_name
@@ -84,6 +86,8 @@ class Qwen3TTSPipeline:
         self.num_epochs = num_epochs
         self.language = language
 
+        self.mlflow_url = mlflow_url
+        self.mlflow_experiment = mlflow_experiment
         self.use_lora = use_lora
         self.lora_rank = lora_rank
         self.lora_alpha = lora_alpha
@@ -237,10 +241,22 @@ class Qwen3TTSPipeline:
 
         logging_dir = self.output_dir / "logs"
         logging_dir.mkdir(parents=True, exist_ok=True)
+
+        # Configure loggers
+        log_with = ["tensorboard"]
+        init_kwargs = {}
+        if self.mlflow_url:
+            log_with.append("mlflow")
+            os.environ["MLFLOW_TRACKING_URI"] = self.mlflow_url
+            init_kwargs["mlflow"] = {
+                "experiment_name": self.mlflow_experiment,
+                "run_name": f"{self.speaker_name}-{self.num_epochs}ep" + ("-lora" if self.use_lora else ""),
+            }
+
         accelerator = Accelerator(
             gradient_accumulation_steps=4,
             mixed_precision="bf16",
-            log_with="tensorboard",
+            log_with=log_with,
             project_dir=str(logging_dir),
         )
 
@@ -315,6 +331,23 @@ class Qwen3TTSPipeline:
 
         talker_inner = get_talker_inner(model)
 
+        # Initialize trackers (MLflow, tensorboard)
+        accelerator.init_trackers(
+            self.mlflow_experiment if self.mlflow_url else "tts-finetune",
+            config={
+                "speaker_name": self.speaker_name,
+                "num_epochs": self.num_epochs,
+                "batch_size": self.batch_size,
+                "lr": self.lr,
+                "lora": self.use_lora,
+                "lora_rank": self.lora_rank if self.use_lora else None,
+                "gradient_checkpointing": self.gradient_checkpointing,
+                "num_samples": len(train_data),
+                "model": self.init_model_path,
+            },
+            init_kwargs=init_kwargs if self.mlflow_url else {},
+        )
+
         target_speaker_embedding = None
         model.train()
 
@@ -387,9 +420,12 @@ class Qwen3TTSPipeline:
                     optimizer.zero_grad()
 
                 if step % 10 == 0:
+                    loss_val = loss.item()
                     accelerator.print(
-                        f"Epoch {epoch} | Step {step} | Loss: {loss.item():.4f}"
+                        f"Epoch {epoch} | Step {step} | Loss: {loss_val:.4f}"
                     )
+                    global_step = epoch * len(train_dataloader) + step
+                    accelerator.log({"loss": loss_val, "epoch": epoch}, step=global_step)
 
             # Save checkpoint
             if accelerator.is_main_process:
@@ -480,6 +516,7 @@ class Qwen3TTSPipeline:
                 save_file(state_dict, os.path.join(output_dir, "model.safetensors"))
                 print(f"Saved checkpoint to {output_dir}")
 
+        accelerator.end_training()
         print("\nTraining complete!")
 
     def run(self) -> None:
@@ -513,6 +550,8 @@ def main():
     parser.add_argument("--lr", type=float, default=2e-5, help="Learning rate")
     parser.add_argument("--num_epochs", type=int, default=3, help="Epochs")
     parser.add_argument("--language", type=str, default="en", help="Language code")
+    parser.add_argument("--mlflow_url", type=str, default=None, help="MLflow tracking server URL")
+    parser.add_argument("--mlflow_experiment", type=str, default="qwen3-tts-finetune", help="MLflow experiment name")
     parser.add_argument("--lora", action="store_true", help="Use LoRA for memory-efficient training")
     parser.add_argument("--lora_rank", type=int, default=16, help="LoRA rank")
     parser.add_argument("--lora_alpha", type=int, default=32, help="LoRA alpha")
@@ -536,6 +575,8 @@ def main():
         lr=args.lr,
         num_epochs=args.num_epochs,
         language=args.language,
+        mlflow_url=args.mlflow_url,
+        mlflow_experiment=args.mlflow_experiment,
         use_lora=args.lora,
         lora_rank=args.lora_rank,
         lora_alpha=args.lora_alpha,
