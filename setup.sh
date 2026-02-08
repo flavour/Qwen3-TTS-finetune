@@ -70,6 +70,7 @@ uv pip install \
     "numpy>=1.26,<2" \
     "numba>=0.60" \
     "librosa>=0.10.2" \
+    peft \
     soundfile \
     tqdm \
     transformers \

@@ -68,6 +68,9 @@ while [[ $# -gt 0 ]]; do
         --lr)            LR="$2"; shift 2 ;;
         --epochs)        EPOCHS="$2"; shift 2 ;;
         --language)      LANGUAGE="$2"; shift 2 ;;
+        --lora)          LORA=true; shift ;;
+        --lora_rank)     LORA_RANK="$2"; shift 2 ;;
+        --gradient_checkpointing) GRAD_CKPT=true; shift ;;
         --help)
             echo "Qwen3-TTS Fine-Tuning"
             echo ""
@@ -88,6 +91,9 @@ while [[ $# -gt 0 ]]; do
             echo "  --lr LR                Learning rate (default: 2e-5)"
             echo "  --epochs N             Epochs (default: 3)"
             echo "  --language LANG        Language code (default: en)"
+            echo "  --lora                 Use LoRA for memory-efficient training (~8GB VRAM)"
+            echo "  --lora_rank N          LoRA rank (default: 16)"
+            echo "  --gradient_checkpointing  Reduce activation memory"
             exit 0
             ;;
         *) echo -e "${RED}Unknown option: $1${NC}"; exit 1 ;;
@@ -147,5 +153,9 @@ if [ -n "$JSONL" ]; then
 else
     CMD="$CMD --audio_dir \"$AUDIO_DIR\""
 fi
+
+[ "${LORA:-}" = true ] && CMD="$CMD --lora"
+[ -n "${LORA_RANK:-}" ] && CMD="$CMD --lora_rank $LORA_RANK"
+[ "${GRAD_CKPT:-}" = true ] && CMD="$CMD --gradient_checkpointing"
 
 eval $CMD

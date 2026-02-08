@@ -66,6 +66,10 @@ class Qwen3TTSPipeline:
         lr: float = 2e-5,
         num_epochs: int = 3,
         language: str = "en",
+        use_lora: bool = False,
+        lora_rank: int = 16,
+        lora_alpha: int = 32,
+        gradient_checkpointing: bool = False,
     ):
         self.ref_audio = Path(ref_audio)
         self.speaker_name = speaker_name
@@ -80,6 +84,10 @@ class Qwen3TTSPipeline:
         self.num_epochs = num_epochs
         self.language = language
 
+        self.use_lora = use_lora
+        self.lora_rank = lora_rank
+        self.lora_alpha = lora_alpha
+        self.gradient_checkpointing = gradient_checkpointing
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.train_raw_jsonl = self.output_dir / "train_raw.jsonl"
         self.train_with_codes_jsonl = self.output_dir / "train_with_codes.jsonl"
@@ -245,6 +253,30 @@ class Qwen3TTSPipeline:
         )
 
         config = AutoConfig.from_pretrained(self.init_model_path)
+
+        # Enable gradient checkpointing
+        if self.gradient_checkpointing:
+            if hasattr(qwen3tts.model, "gradient_checkpointing_enable"):
+                qwen3tts.model.gradient_checkpointing_enable()
+                print("Gradient checkpointing enabled")
+            elif hasattr(qwen3tts.model, "talker") and hasattr(qwen3tts.model.talker, "gradient_checkpointing_enable"):
+                qwen3tts.model.talker.gradient_checkpointing_enable()
+                print("Gradient checkpointing enabled (talker)")
+
+        # Apply LoRA
+        if self.use_lora:
+            from peft import LoraConfig, get_peft_model, TaskType
+            lora_config = LoraConfig(
+                r=self.lora_rank,
+                lora_alpha=self.lora_alpha,
+                target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+                lora_dropout=0.05,
+                bias="none",
+                task_type=TaskType.CAUSAL_LM,
+            )
+            qwen3tts.model.talker = get_peft_model(qwen3tts.model.talker, lora_config)
+            qwen3tts.model.talker.print_trainable_parameters()
+            print("LoRA applied to talker model")
 
         train_data = []
         with open(self.train_with_codes_jsonl) as f:
@@ -421,6 +453,10 @@ def main():
     parser.add_argument("--lr", type=float, default=2e-5, help="Learning rate")
     parser.add_argument("--num_epochs", type=int, default=3, help="Epochs")
     parser.add_argument("--language", type=str, default="en", help="Language code")
+    parser.add_argument("--lora", action="store_true", help="Use LoRA for memory-efficient training")
+    parser.add_argument("--lora_rank", type=int, default=16, help="LoRA rank")
+    parser.add_argument("--lora_alpha", type=int, default=32, help="LoRA alpha")
+    parser.add_argument("--gradient_checkpointing", action="store_true", help="Enable gradient checkpointing")
 
     args = parser.parse_args()
 
@@ -440,6 +476,10 @@ def main():
         lr=args.lr,
         num_epochs=args.num_epochs,
         language=args.language,
+        use_lora=args.lora,
+        lora_rank=args.lora_rank,
+        lora_alpha=args.lora_alpha,
+        gradient_checkpointing=args.gradient_checkpointing,
     )
 
     pipeline.run()

@@ -49,6 +49,10 @@ def train():
     parser.add_argument("--lr", type=float, default=2e-5)
     parser.add_argument("--num_epochs", type=int, default=3)
     parser.add_argument("--speaker_name", type=str, default="speaker_test")
+    parser.add_argument("--lora", action="store_true", help="Use LoRA for memory-efficient training")
+    parser.add_argument("--lora_rank", type=int, default=16, help="LoRA rank (default: 16)")
+    parser.add_argument("--lora_alpha", type=int, default=32, help="LoRA alpha (default: 32)")
+    parser.add_argument("--gradient_checkpointing", action="store_true", help="Enable gradient checkpointing")
     args = parser.parse_args()
 
     accelerator = Accelerator(gradient_accumulation_steps=4, mixed_precision="bf16", log_with="tensorboard")
@@ -65,6 +69,31 @@ def train():
         attn_implementation=attn_implementation,
     )
     config = AutoConfig.from_pretrained(MODEL_PATH)
+
+    # Enable gradient checkpointing to reduce activation memory
+    if args.gradient_checkpointing:
+        if hasattr(qwen3tts.model, "gradient_checkpointing_enable"):
+            qwen3tts.model.gradient_checkpointing_enable()
+            print("Gradient checkpointing enabled")
+        elif hasattr(qwen3tts.model, "talker") and hasattr(qwen3tts.model.talker, "gradient_checkpointing_enable"):
+            qwen3tts.model.talker.gradient_checkpointing_enable()
+            print("Gradient checkpointing enabled (talker)")
+
+    # Apply LoRA for memory-efficient training
+    if args.lora:
+        from peft import LoraConfig, get_peft_model, TaskType
+        lora_config = LoraConfig(
+            r=args.lora_rank,
+            lora_alpha=args.lora_alpha,
+            target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+            lora_dropout=0.05,
+            bias="none",
+            task_type=TaskType.CAUSAL_LM,
+        )
+        # Apply LoRA to the talker (the main LM component)
+        qwen3tts.model.talker = get_peft_model(qwen3tts.model.talker, lora_config)
+        qwen3tts.model.talker.print_trainable_parameters()
+        print("LoRA applied to talker model")
 
     train_data = open(args.train_jsonl).readlines()
     train_data = [json.loads(line) for line in train_data]
