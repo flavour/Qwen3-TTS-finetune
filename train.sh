@@ -72,6 +72,7 @@ while [[ $# -gt 0 ]]; do
         --lora_rank)     LORA_RANK="$2"; shift 2 ;;
         --gradient_checkpointing) GRAD_CKPT=true; shift ;;
         --warmup_steps)  WARMUP_STEPS="$2"; shift 2 ;;
+        --early_stopping) EARLY_STOPPING="$2"; shift 2 ;;
         --mlflow_url)    MLFLOW_URL="$2"; shift 2 ;;
         --mlflow_experiment) MLFLOW_EXP="$2"; shift 2 ;;
         --help)
@@ -163,5 +164,6 @@ fi
 [ -n "${LORA_RANK:-}" ] && CMD="$CMD --lora_rank $LORA_RANK"
 [ "${GRAD_CKPT:-}" = true ] && CMD="$CMD --gradient_checkpointing"
 [ -n "${WARMUP_STEPS:-}" ] && CMD="$CMD --warmup_steps $WARMUP_STEPS"
+[ -n "${EARLY_STOPPING:-}" ] && CMD="$CMD --early_stopping $EARLY_STOPPING"
 
 eval $CMD

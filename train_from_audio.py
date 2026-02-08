@@ -71,6 +71,7 @@ class Qwen3TTSPipeline:
         lora_alpha: int = 32,
         gradient_checkpointing: bool = False,
         warmup_steps: int = 50,
+        early_stopping_patience: int = 0,
         mlflow_url: str | None = None,
         mlflow_experiment: str = "qwen3-tts-finetune",
     ):
@@ -94,6 +95,7 @@ class Qwen3TTSPipeline:
         self.lora_alpha = lora_alpha
         self.gradient_checkpointing = gradient_checkpointing
         self.warmup_steps = warmup_steps
+        self.early_stopping_patience = early_stopping_patience
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.train_raw_jsonl = self.output_dir / "train_raw.jsonl"
         self.train_with_codes_jsonl = self.output_dir / "train_with_codes.jsonl"
@@ -381,6 +383,8 @@ class Qwen3TTSPipeline:
         )
 
         target_speaker_embedding = None
+        best_val_loss = float("inf")
+        patience_counter = 0
         model.train()
 
         for epoch in range(self.num_epochs):
@@ -503,6 +507,18 @@ class Qwen3TTSPipeline:
             global_step = (epoch + 1) * len(train_dataloader)
             accelerator.log({"val_loss": avg_val_loss, "epoch": epoch}, step=global_step)
             accelerator.print(f"Epoch {epoch} | Val Loss: {avg_val_loss:.4f}")
+
+            # Early stopping check
+            if avg_val_loss < best_val_loss:
+                best_val_loss = avg_val_loss
+                patience_counter = 0
+            else:
+                patience_counter += 1
+                if self.early_stopping_patience > 0:
+                    accelerator.print(
+                        f"  ⚠ Val loss did not improve ({patience_counter}/{self.early_stopping_patience})"
+                    )
+
             model.train()
 
             # Save checkpoint
@@ -594,6 +610,14 @@ class Qwen3TTSPipeline:
                 save_file(state_dict, os.path.join(output_dir, "model.safetensors"))
                 print(f"Saved checkpoint to {output_dir}")
 
+            # Early stopping: break after saving checkpoint so best model is preserved
+            if self.early_stopping_patience > 0 and patience_counter >= self.early_stopping_patience:
+                accelerator.print(
+                    f"\n🛑 Early stopping at epoch {epoch} (val loss didn't improve for "
+                    f"{self.early_stopping_patience} epochs). Best val loss: {best_val_loss:.4f}"
+                )
+                break
+
         accelerator.end_training()
         print("\nTraining complete!")
 
@@ -627,6 +651,7 @@ def main():
     parser.add_argument("--batch_size", type=int, default=2, help="Batch size")
     parser.add_argument("--lr", type=float, default=2e-5, help="Learning rate")
     parser.add_argument("--warmup_steps", type=int, default=50, help="LR warmup steps (cosine schedule)")
+    parser.add_argument("--early_stopping", type=int, default=0, help="Stop after N epochs without val loss improvement (0=disabled)")
     parser.add_argument("--num_epochs", type=int, default=3, help="Epochs")
     parser.add_argument("--language", type=str, default="en", help="Language code")
     parser.add_argument("--mlflow_url", type=str, default=None, help="MLflow tracking server URL")
@@ -653,6 +678,7 @@ def main():
         batch_size=args.batch_size,
         lr=args.lr,
         warmup_steps=args.warmup_steps,
+        early_stopping_patience=args.early_stopping,
         num_epochs=args.num_epochs,
         language=args.language,
         mlflow_url=args.mlflow_url,
