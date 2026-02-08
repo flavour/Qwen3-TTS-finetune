@@ -1,76 +1,49 @@
 #!/usr/bin/env bash
-# Qwen3-TTS One-Command Fine-Tuning Script
-#
-# This script provides the complete end-to-end pipeline:
-# 1. Checks/installs system dependencies (sox)
-# 2. Automatically sets up Python environment if needed
-# 3. Transcribes audio files using WhisperX
-# 4. Creates train_raw.jsonl
-# 5. Prepares data (extracts audio_codes)
-# 6. Fine-tunes the model
+# Qwen3-TTS One-Command Fine-Tuning Script (uv-based, no WhisperX)
 #
 # Usage:
+#   # With pre-built JSONL (our workflow — hand-corrected transcripts):
+#   ./train.sh --jsonl ./train_raw.jsonl --ref_audio ./ref.wav --speaker_name lagertha
+#
+#   # With audio dir (auto-transcribes if no --jsonl):
 #   ./train.sh --audio_dir ./audio --ref_audio ./ref.wav --speaker_name my_voice
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VENV_DIR="$SCRIPT_DIR/venv"
 
-# Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 
-# Function to check and install system dependencies
+# Check system deps
 check_system_deps() {
-    local missing_deps=()
-
-    # Check for sox
     if ! command -v sox &> /dev/null; then
-        missing_deps+=("sox")
-    fi
-
-    if [ ${#missing_deps[@]} -gt 0 ]; then
-        echo -e "${YELLOW}Installing system dependencies: ${missing_deps[*]}${NC}"
-
-        # Try to install automatically (works on Debian/Ubuntu-based systems like RunPod)
+        echo -e "${YELLOW}Installing sox...${NC}"
         if command -v apt-get &> /dev/null; then
             apt-get update -qq && apt-get install -y -qq sox libsox-fmt-all 2>/dev/null || {
-                echo -e "${RED}Could not auto-install. Please run manually:${NC}"
-                echo -e "  sudo apt-get install sox libsox-fmt-all"
+                echo -e "${RED}Please install sox: sudo apt install sox libsox-fmt-all${NC}"
                 exit 1
             }
-            echo -e "${GREEN}System dependencies installed${NC}"
         else
-            echo -e "${RED}Please install system dependencies manually:${NC}"
-            echo -e "  sox libsox-fmt-all"
+            echo -e "${RED}Please install sox manually${NC}"
             exit 1
         fi
     fi
 }
 
-# Check system dependencies first (needed on every RunPod start)
 check_system_deps
 
-# Function to check if environment is ready
+# Check environment
 check_environment_ready() {
-    # Check if venv exists
-    if [ ! -d "$VENV_DIR" ]; then
-        return 1
-    fi
-
-    # Check if key dependencies are installed
-    if ! "$VENV_DIR/bin/python" -c "import torch; import whisperx; import qwen_tts" 2>/dev/null; then
-        return 1
-    fi
-
-    return 0
+    [ -d "$SCRIPT_DIR/.venv" ] && \
+    "$SCRIPT_DIR/.venv/bin/python" -c "import torch; import qwen_tts" 2>/dev/null
 }
 
-# Default values
+# Defaults
 AUDIO_DIR=""
+JSONL=""
 REF_AUDIO=""
 SPEAKER_NAME="my_speaker"
 OUTPUT_DIR="./output"
@@ -80,152 +53,99 @@ INIT_MODEL_PATH="Qwen/Qwen3-TTS-12Hz-1.7B-Base"
 BATCH_SIZE=2
 LR=2e-5
 EPOCHS=3
-WHISPER_MODEL="large-v3"
-LANGUAGE="auto"
+LANGUAGE="en"
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --audio_dir)
-            AUDIO_DIR="$2"
-            shift 2
-            ;;
-        --ref_audio)
-            REF_AUDIO="$2"
-            shift 2
-            ;;
-        --speaker_name)
-            SPEAKER_NAME="$2"
-            shift 2
-            ;;
-        --output_dir)
-            OUTPUT_DIR="$2"
-            shift 2
-            ;;
-        --device)
-            DEVICE="$2"
-            shift 2
-            ;;
-        --batch_size)
-            BATCH_SIZE="$2"
-            shift 2
-            ;;
-        --lr)
-            LR="$2"
-            shift 2
-            ;;
-        --epochs)
-            EPOCHS="$2"
-            shift 2
-            ;;
-        --whisper_model)
-            WHISPER_MODEL="$2"
-            shift 2
-            ;;
-        --language)
-            LANGUAGE="$2"
-            shift 2
-            ;;
+        --audio_dir)     AUDIO_DIR="$2"; shift 2 ;;
+        --jsonl)         JSONL="$2"; shift 2 ;;
+        --ref_audio)     REF_AUDIO="$2"; shift 2 ;;
+        --speaker_name)  SPEAKER_NAME="$2"; shift 2 ;;
+        --output_dir)    OUTPUT_DIR="$2"; shift 2 ;;
+        --device)        DEVICE="$2"; shift 2 ;;
+        --batch_size)    BATCH_SIZE="$2"; shift 2 ;;
+        --lr)            LR="$2"; shift 2 ;;
+        --epochs)        EPOCHS="$2"; shift 2 ;;
+        --language)      LANGUAGE="$2"; shift 2 ;;
         --help)
-            echo "Qwen3-TTS One-Command Fine-Tuning"
+            echo "Qwen3-TTS Fine-Tuning"
             echo ""
             echo "Usage:"
-            echo "  $0 --audio_dir DIR --ref_audio FILE [OPTIONS]"
+            echo "  $0 --jsonl FILE --ref_audio FILE [OPTIONS]     # Pre-built JSONL"
+            echo "  $0 --audio_dir DIR --ref_audio FILE [OPTIONS]  # Auto-transcribe"
             echo ""
             echo "Required:"
-            echo "  --audio_dir DIR        Directory containing WAV files for training"
-            echo "  --ref_audio FILE       Path to reference audio file (WAV)"
+            echo "  --ref_audio FILE       Reference audio for speaker embedding"
+            echo "  --jsonl FILE           Pre-built train_raw.jsonl (skips transcription)"
+            echo "  --audio_dir DIR        Directory of WAVs (needs ASR — not recommended)"
             echo ""
             echo "Optional:"
-            echo "  --speaker_name NAME    Name for the speaker (default: my_speaker)"
+            echo "  --speaker_name NAME    Speaker name (default: my_speaker)"
             echo "  --output_dir DIR       Output directory (default: ./output)"
-            echo "  --device DEVICE        Device to use (default: cuda:0)"
+            echo "  --device DEVICE        Device (default: cuda:0)"
             echo "  --batch_size N         Batch size (default: 2)"
             echo "  --lr LR                Learning rate (default: 2e-5)"
-            echo "  --epochs N             Number of epochs (default: 3)"
-            echo "  --whisper_model MODEL  Whisper model size (default: large-v3)"
-            echo "  --language LANG        Language code (default: auto)"
-            echo ""
-            echo "Example:"
-            echo "  $0 --audio_dir ./my_recordings --ref_audio ./ref.wav --speaker_name alice"
-            echo ""
-            echo "The script will automatically set up the environment if needed."
+            echo "  --epochs N             Epochs (default: 3)"
+            echo "  --language LANG        Language code (default: en)"
             exit 0
             ;;
-        *)
-            echo "Unknown option: $1"
-            echo "Use --help for usage information"
-            exit 1
-            ;;
+        *) echo -e "${RED}Unknown option: $1${NC}"; exit 1 ;;
     esac
 done
 
-# Validate required arguments
-if [ -z "$AUDIO_DIR" ] || [ -z "$REF_AUDIO" ]; then
-    echo -e "${RED}Error: --audio_dir and --ref_audio are required${NC}"
-    echo "Use --help for usage information"
+# Validate
+if [ -z "$REF_AUDIO" ]; then
+    echo -e "${RED}Error: --ref_audio is required${NC}"
     exit 1
 fi
 
-# Check and setup environment automatically
-if ! check_environment_ready; then
-    echo -e "${YELLOW}========================================${NC}"
-    echo -e "${YELLOW}Environment not ready. Running setup...${NC}"
-    echo -e "${YELLOW}========================================${NC}"
-    echo ""
-
-    # Run setup in auto mode (non-interactive)
-    bash "$SCRIPT_DIR/setup.sh" --auto
-
-    echo ""
-    echo -e "${GREEN}Setup complete. Continuing with training...${NC}"
-    echo ""
+if [ -z "$JSONL" ] && [ -z "$AUDIO_DIR" ]; then
+    echo -e "${RED}Error: either --jsonl or --audio_dir is required${NC}"
+    exit 1
 fi
 
-# Configure HuggingFace cache before activating venv
-export HF_HOME="$VENV_DIR/hf_cache"
+# Setup if needed
+if ! check_environment_ready; then
+    echo -e "${YELLOW}Environment not ready. Running setup...${NC}"
+    cd "$SCRIPT_DIR"
+    bash setup.sh --auto
+fi
 
-# Create cache directory if it doesn't exist
-mkdir -p "$HF_HOME"
-
-# Activate venv
-source "$VENV_DIR/bin/activate"
-
-# Print configuration
-echo "=========================================="
-echo "Qwen3-TTS End-to-End Fine-Tuning"
-echo "=========================================="
-echo "Audio directory:     $AUDIO_DIR"
-echo "Reference audio:     $REF_AUDIO"
-echo "Speaker name:        $SPEAKER_NAME"
-echo "Output directory:    $OUTPUT_DIR"
-echo "Device:              $DEVICE"
-echo "Batch size:          $BATCH_SIZE"
-echo "Learning rate:       $LR"
-echo "Epochs:              $EPOCHS"
-echo "Whisper model:       $WHISPER_MODEL"
-echo "Language:            $LANGUAGE"
-echo "HF cache:            $HF_HOME"
-echo "=========================================="
+echo -e "${GREEN}========================================${NC}"
+echo -e "${GREEN}Qwen3-TTS Fine-Tuning${NC}"
+echo -e "${GREEN}========================================${NC}"
+echo -e "  Speaker:    $SPEAKER_NAME"
+echo -e "  Ref audio:  $REF_AUDIO"
+echo -e "  Output:     $OUTPUT_DIR"
+echo -e "  Device:     $DEVICE"
+echo -e "  Batch size: $BATCH_SIZE"
+echo -e "  LR:         $LR"
+echo -e "  Epochs:     $EPOCHS"
+if [ -n "$JSONL" ]; then
+    echo -e "  JSONL:      $JSONL"
+else
+    echo -e "  Audio dir:  $AUDIO_DIR"
+fi
+echo -e "${GREEN}========================================${NC}"
 echo ""
 
-# Run the Python script
-python "$SCRIPT_DIR/train_from_audio.py" \
-    --audio_dir "$AUDIO_DIR" \
-    --ref_audio "$REF_AUDIO" \
-    --speaker_name "$SPEAKER_NAME" \
-    --output_dir "$OUTPUT_DIR" \
-    --device "$DEVICE" \
-    --tokenizer_model_path "$TOKENIZER_MODEL_PATH" \
-    --init_model_path "$INIT_MODEL_PATH" \
-    --batch_size "$BATCH_SIZE" \
-    --lr "$LR" \
-    --num_epochs "$EPOCHS" \
-    --whisper_model "$WHISPER_MODEL" \
-    --language "$LANGUAGE"
+# Build command
+cd "$SCRIPT_DIR"
+CMD="uv run python train_from_audio.py \
+    --ref_audio \"$REF_AUDIO\" \
+    --speaker_name \"$SPEAKER_NAME\" \
+    --output_dir \"$OUTPUT_DIR\" \
+    --device \"$DEVICE\" \
+    --batch_size $BATCH_SIZE \
+    --lr $LR \
+    --num_epochs $EPOCHS \
+    --language \"$LANGUAGE\""
 
-echo ""
-echo "=========================================="
-echo "Fine-tuning complete!"
-echo "Checkpoints saved to: $OUTPUT_DIR"
-echo "=========================================="
+if [ -n "$JSONL" ]; then
+    CMD="$CMD --jsonl \"$JSONL\""
+else
+    CMD="$CMD --audio_dir \"$AUDIO_DIR\""
+fi
+
+eval $CMD

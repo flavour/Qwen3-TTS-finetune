@@ -1,42 +1,39 @@
 #!/usr/bin/env python3
 # coding=utf-8
 """
-Qwen3-TTS One-Command Fine-Tuning Script
+Qwen3-TTS Fine-Tuning Script
 
-This script provides a complete end-to-end fine-tuning pipeline:
-1. Takes a directory of WAV files and a reference audio
-2. Automatically transcribes using WhisperX
-3. Creates the train_raw.jsonl
-4. Prepares data (extracts audio_codes)
-5. Trains the model
+Supports two modes:
+  1. --jsonl: Use pre-built train_raw.jsonl (our workflow, hand-corrected transcripts)
+  2. --audio_dir: Auto-discover WAV files (transcripts must already be in JSONL)
 
-Usage:
-    python train_from_audio.py \
-        --audio_dir ./my_audio_files \
-        --ref_audio ./reference.wav \
-        --speaker_name my_voice \
-        --output_dir ./output
+Pipeline:
+  1. Load/create train_raw.jsonl
+  2. Extract audio_codes using Qwen3-TTS Tokenizer
+  3. Fine-tune the model
+
+Based on https://github.com/sruckh/Qwen3-TTS-finetune
+Modified: removed WhisperX dependency, added --jsonl input, uses uv.
 """
 
 import argparse
 import json
 import os
 import shutil
-import subprocess
-import sys
 from pathlib import Path
-from typing import List, Dict, Any
+from typing import Any, Dict, List
+
+import torch
+import torchaudio
+from tqdm import tqdm
 
 
 def configure_hf_cache():
-    """Configure HuggingFace cache inside venv if available."""
+    """Configure HuggingFace cache."""
     script_dir = Path(__file__).parent.absolute()
-    hf_cache = script_dir / "venv" / "hf_cache"
-
-    # Only configure if venv exists
+    hf_cache = script_dir / ".venv" / "hf_cache"
     if hf_cache.parent.exists():
         hf_cache.mkdir(parents=True, exist_ok=True)
-        # Only set HF_HOME - let HuggingFace manage subdirectories
         os.environ.setdefault("HF_HOME", str(hf_cache))
 
 
@@ -49,12 +46,7 @@ def get_attention_implementation():
         return "eager"
 
 
-# Configure HF cache before any HuggingFace imports
 configure_hf_cache()
-
-import torch
-import torchaudio
-from tqdm import tqdm
 
 
 class Qwen3TTSPipeline:
@@ -62,9 +54,10 @@ class Qwen3TTSPipeline:
 
     def __init__(
         self,
-        audio_dir: str,
         ref_audio: str,
         speaker_name: str,
+        audio_dir: str | None = None,
+        jsonl: str | None = None,
         output_dir: str = "./output",
         device: str = "cuda:0",
         tokenizer_model_path: str = "Qwen/Qwen3-TTS-Tokenizer-12Hz",
@@ -72,13 +65,12 @@ class Qwen3TTSPipeline:
         batch_size: int = 2,
         lr: float = 2e-5,
         num_epochs: int = 3,
-        whisper_model: str = "large-v3",
-        whisper_compute_type: str = "float16",
         language: str = "en",
     ):
-        self.audio_dir = Path(audio_dir)
         self.ref_audio = Path(ref_audio)
         self.speaker_name = speaker_name
+        self.audio_dir = Path(audio_dir) if audio_dir else None
+        self.jsonl = Path(jsonl) if jsonl else None
         self.output_dir = Path(output_dir)
         self.device = device
         self.tokenizer_model_path = tokenizer_model_path
@@ -86,34 +78,25 @@ class Qwen3TTSPipeline:
         self.batch_size = batch_size
         self.lr = lr
         self.num_epochs = num_epochs
-        self.whisper_model = whisper_model
-        self.whisper_compute_type = whisper_compute_type
         self.language = language
 
-        # Create output directory
         self.output_dir.mkdir(parents=True, exist_ok=True)
-
-        # Intermediate files
         self.train_raw_jsonl = self.output_dir / "train_raw.jsonl"
         self.train_with_codes_jsonl = self.output_dir / "train_with_codes.jsonl"
-
-        # Detect attention implementation
         self.attn_implementation = get_attention_implementation()
 
     def validate_audio_files(self) -> List[Path]:
         """Find and validate all WAV files in the audio directory."""
-        if not self.audio_dir.exists():
+        if not self.audio_dir or not self.audio_dir.exists():
             raise ValueError(f"Audio directory not found: {self.audio_dir}")
 
         wav_files = list(self.audio_dir.glob("*.wav")) + list(self.audio_dir.glob("*.WAV"))
-
         if not wav_files:
             raise ValueError(f"No WAV files found in {self.audio_dir}")
 
         if not self.ref_audio.exists():
             raise ValueError(f"Reference audio not found: {self.ref_audio}")
 
-        # Validate audio files can be loaded
         valid_files = []
         for wav_path in tqdm(wav_files, desc="Validating audio files"):
             try:
@@ -125,156 +108,75 @@ class Qwen3TTSPipeline:
         print(f"Found {len(valid_files)} valid audio files")
         return valid_files
 
-    def check_dependencies(self) -> None:
-        """Check and install all required dependencies."""
+    def load_or_create_jsonl(self) -> None:
+        """Load pre-built JSONL or create from audio directory."""
         print(f"\n{'='*60}")
-        print("Checking and installing dependencies...")
+        print("STEP 1: Preparing train_raw.jsonl")
         print(f"{'='*60}\n")
 
-        # Core dependencies
-        core_packages = [
-            ("torch", "torch"),
-            ("torchaudio", "torchaudio"),
-            ("numpy", "numpy"),
-            ("librosa", "librosa"),
-            ("soundfile", "soundfile"),
-            ("tqdm", "tqdm"),
-        ]
+        if self.jsonl and self.jsonl.exists():
+            # Use pre-built JSONL — just copy/link to output dir
+            print(f"Using pre-built JSONL: {self.jsonl}")
 
-        # ML/TTS dependencies
-        ml_packages = [
-            ("transformers", "transformers"),
-            ("accelerate", "accelerate"),
-            ("safetensors", "safetensors"),
-            ("huggingface_hub", "huggingface-hub"),
-            ("hf_transfer", "hf_transfer"),
-        ]
+            # Read and inject ref_audio into each entry
+            entries = []
+            with open(self.jsonl) as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    entry = json.loads(line)
+                    # Ensure ref_audio is set
+                    if "ref_audio" not in entry:
+                        entry["ref_audio"] = str(self.ref_audio.resolve())
+                    entries.append(entry)
 
-        # Audio processing
-        audio_packages = [
-            ("whisperx", "whisperx"),
-            ("qwen_tts", "qwen-tts"),
-        ]
+            # Resolve relative audio paths against JSONL's parent dir
+            jsonl_dir = self.jsonl.parent.resolve()
+            for entry in entries:
+                audio_path = Path(entry["audio"])
+                if not audio_path.is_absolute():
+                    resolved = jsonl_dir / audio_path
+                    entry["audio"] = str(resolved.resolve())
 
-        all_packages = core_packages + ml_packages + audio_packages
+            with open(self.train_raw_jsonl, "w", encoding="utf-8") as f:
+                for entry in entries:
+                    f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
-        for module_name, package_name in all_packages:
-            try:
-                __import__(module_name)
-                print(f"  {module_name} is installed")
-            except ImportError:
-                print(f"  Installing {package_name}...")
-                subprocess.check_call([
-                    sys.executable, "-m", "pip", "install", package_name, "-q"
-                ])
-                print(f"  {package_name} installed")
+            print(f"Loaded {len(entries)} entries → {self.train_raw_jsonl}")
 
-        # Check flash_attn (optional)
-        try:
-            import flash_attn  # noqa: F401
-            print(f"  flash_attn is installed (using flash_attention_2)")
-        except ImportError:
-            print(f"  flash_attn not available (using eager attention - slower but compatible)")
+        elif self.audio_dir:
+            # Create JSONL from audio files (no transcription — user must provide)
+            audio_files = self.validate_audio_files()
+            print(f"\nWarning: Creating JSONL from audio files WITHOUT transcription.")
+            print(f"For best results, use --jsonl with hand-corrected transcripts.\n")
 
-        print("\nAll dependencies are ready!")
-        print(f"Attention implementation: {self.attn_implementation}")
-        print()
-
-    def transcribe_with_whisperx(self, audio_files: List[Path]) -> List[Dict[str, Any]]:
-        """
-        Transcribe audio files using WhisperX.
-
-        Returns a list of dictionaries with audio path and transcription.
-        """
-        # Fix for PyTorch 2.6+ compatibility with pyannote-audio
-        # pyannote models use omegaconf which requires weights_only=False
-        _original_torch_load = torch.load
-        def _patched_torch_load(*args, **kwargs):
-            kwargs['weights_only'] = False  # Force override
-            return _original_torch_load(*args, **kwargs)
-        torch.load = _patched_torch_load
-
-        import whisperx
-
-        print(f"\n{'='*60}")
-        print("STEP 1: Transcribing audio files with WhisperX")
-        print(f"{'='*60}\n")
-
-        # Load WhisperX model
-        print(f"Loading WhisperX model: {self.whisper_model}")
-        device = "cuda" if self.device.startswith("cuda") else "cpu"
-        model = whisperx.load_model(
-            self.whisper_model,
-            device=device,
-            compute_type=self.whisper_compute_type,
-        )
-
-        results = []
-
-        for audio_path in tqdm(audio_files, desc="Transcribing"):
-            try:
-                # Transcribe
-                audio = whisperx.load_audio(str(audio_path))
-                result = model.transcribe(
-                    audio,
-                    batch_size=16 if device == "cuda" else 1,
-                    language=self.language if self.language != "auto" else None,
-                )
-
-                # Get the text
-                text = result["segments"][0]["text"].strip()
-
-                results.append({
-                    "audio": str(audio_path),
-                    "text": text,
-                    "ref_audio": str(self.ref_audio),
-                })
-
-                print(f"  {audio_path.name}: {text[:100]}...")
-
-            except Exception as e:
-                print(f"Warning: Failed to transcribe {audio_path}: {e}")
-                continue
-
-        # Cleanup model
-        del model
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-
-        print(f"\nSuccessfully transcribed {len(results)} files")
-        return results
-
-    def create_train_jsonl(self, data: List[Dict[str, Any]]) -> None:
-        """Create the train_raw.jsonl file."""
-        print(f"\n{'='*60}")
-        print("STEP 2: Creating train_raw.jsonl")
-        print(f"{'='*60}\n")
-
-        with open(self.train_raw_jsonl, "w", encoding="utf-8") as f:
-            for item in data:
-                f.write(json.dumps(item, ensure_ascii=False) + "\n")
-
-        print(f"Created {self.train_raw_jsonl} with {len(data)} entries")
+            # This is a fallback — audio files need accompanying text somehow
+            raise ValueError(
+                "Audio-only mode requires --jsonl with transcripts. "
+                "Use prep_training.py to create train_raw.jsonl from manifest.csv first."
+            )
+        else:
+            raise ValueError("Either --jsonl or --audio_dir is required")
 
     def prepare_data(self) -> None:
-        """Run the data preparation step to extract audio_codes."""
+        """Extract audio_codes using Qwen3-TTS Tokenizer."""
         print(f"\n{'='*60}")
-        print("STEP 3: Preparing data (extracting audio_codes)")
+        print("STEP 2: Preparing data (extracting audio_codes)")
         print(f"{'='*60}\n")
 
-        # Import here to ensure qwen-tts is installed
         from qwen_tts import Qwen3TTSTokenizer
 
-        # Load tokenizer
         print(f"Loading tokenizer: {self.tokenizer_model_path}")
         tokenizer_12hz = Qwen3TTSTokenizer.from_pretrained(
             self.tokenizer_model_path,
             device_map=self.device,
         )
 
-        # Read and process JSONL
-        total_lines = open(self.train_raw_jsonl).readlines()
-        total_lines = [json.loads(line.strip()) for line in total_lines]
+        total_lines = []
+        with open(self.train_raw_jsonl) as f:
+            for line in f:
+                total_lines.append(json.loads(line.strip()))
 
         final_lines = []
         batch_lines = []
@@ -289,39 +191,34 @@ class Qwen3TTSPipeline:
 
             if len(batch_lines) >= BATCH_INFER_NUM:
                 enc_res = tokenizer_12hz.encode(batch_audios)
-                for code, line in zip(enc_res.audio_codes, batch_lines):
-                    line["audio_codes"] = code.cpu().tolist()
-                    final_lines.append(line)
+                for code, bl in zip(enc_res.audio_codes, batch_lines):
+                    bl["audio_codes"] = code.cpu().tolist()
+                    final_lines.append(bl)
                 batch_lines.clear()
                 batch_audios.clear()
 
-        # Process remaining
-        if len(batch_audios) > 0:
+        if batch_audios:
             enc_res = tokenizer_12hz.encode(batch_audios)
-            for code, line in zip(enc_res.audio_codes, batch_lines):
-                line["audio_codes"] = code.cpu().tolist()
-                final_lines.append(line)
+            for code, bl in zip(enc_res.audio_codes, batch_lines):
+                bl["audio_codes"] = code.cpu().tolist()
+                final_lines.append(bl)
 
-        # Write output
-        final_lines = [json.dumps(line, ensure_ascii=False) for line in final_lines]
         with open(self.train_with_codes_jsonl, "w", encoding="utf-8") as f:
-            for line in final_lines:
-                f.writelines(line + "\n")
+            for fl in final_lines:
+                f.write(json.dumps(fl, ensure_ascii=False) + "\n")
 
         print(f"Created {self.train_with_codes_jsonl}")
 
-        # Cleanup
         del tokenizer_12hz
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
     def train_model(self) -> None:
-        """Run the fine-tuning step."""
+        """Run fine-tuning."""
         print(f"\n{'='*60}")
-        print("STEP 4: Fine-tuning model")
+        print("STEP 3: Fine-tuning model")
         print(f"{'='*60}\n")
 
-        # Import training modules
         from dataset import TTSDataset
         from qwen_tts.inference.qwen3_tts_model import Qwen3TTSModel
         from transformers import AutoConfig
@@ -330,7 +227,6 @@ class Qwen3TTSPipeline:
         from accelerate import Accelerator
         from safetensors.torch import save_file
 
-        # Setup accelerator
         logging_dir = self.output_dir / "logs"
         logging_dir.mkdir(parents=True, exist_ok=True)
         accelerator = Accelerator(
@@ -340,9 +236,8 @@ class Qwen3TTSPipeline:
             project_dir=str(logging_dir),
         )
 
-        # Load model with detected attention implementation
         print(f"Loading model: {self.init_model_path}")
-        print(f"Using attention implementation: {self.attn_implementation}")
+        print(f"Attention: {self.attn_implementation}")
         qwen3tts = Qwen3TTSModel.from_pretrained(
             self.init_model_path,
             torch_dtype=torch.bfloat16,
@@ -351,13 +246,13 @@ class Qwen3TTSPipeline:
 
         config = AutoConfig.from_pretrained(self.init_model_path)
 
-        # Load training data
-        train_data = open(self.train_with_codes_jsonl).readlines()
-        train_data = [json.loads(line) for line in train_data]
+        train_data = []
+        with open(self.train_with_codes_jsonl) as f:
+            for line in f:
+                train_data.append(json.loads(line))
 
         print(f"Training on {len(train_data)} samples")
 
-        # Create dataset and dataloader
         dataset = TTSDataset(train_data, qwen3tts.processor, config)
         train_dataloader = DataLoader(
             dataset,
@@ -366,10 +261,8 @@ class Qwen3TTSPipeline:
             collate_fn=dataset.collate_fn,
         )
 
-        # Setup optimizer
         optimizer = AdamW(qwen3tts.model.parameters(), lr=self.lr, weight_decay=0.01)
 
-        # Prepare with accelerator
         model, optimizer, train_dataloader = accelerator.prepare(
             qwen3tts.model, optimizer, train_dataloader
         )
@@ -377,7 +270,6 @@ class Qwen3TTSPipeline:
         target_speaker_embedding = None
         model.train()
 
-        # Training loop
         for epoch in range(self.num_epochs):
             print(f"\nEpoch {epoch + 1}/{self.num_epochs}")
             for step, batch in enumerate(train_dataloader):
@@ -391,7 +283,6 @@ class Qwen3TTSPipeline:
                     codec_0_labels = batch["codec_0_labels"]
                     codec_mask = batch["codec_mask"]
 
-                    # Get speaker embedding
                     speaker_embedding = model.speaker_encoder(
                         ref_mels.to(model.device).to(model.dtype)
                     ).detach()
@@ -414,7 +305,6 @@ class Qwen3TTSPipeline:
 
                     input_embeddings = input_text_embedding + input_codec_embedding
 
-                    # Add codec embeddings for each layer
                     for i in range(1, 16):
                         codec_i_embedding = model.talker.code_predictor.get_input_embeddings()[
                             i - 1
@@ -422,7 +312,6 @@ class Qwen3TTSPipeline:
                         codec_i_embedding = codec_i_embedding * codec_mask.unsqueeze(-1)
                         input_embeddings = input_embeddings + codec_i_embedding
 
-                    # Forward pass
                     outputs = model.talker(
                         inputs_embeds=input_embeddings[:, :-1, :],
                         attention_mask=attention_mask[:, :-1],
@@ -454,35 +343,28 @@ class Qwen3TTSPipeline:
 
             # Save checkpoint
             if accelerator.is_main_process:
-                output_dir = os.path.join(
-                    str(self.output_dir), f"checkpoint-epoch-{epoch}"
-                )
+                output_dir = os.path.join(str(self.output_dir), f"checkpoint-epoch-{epoch}")
 
-                # Get the actual model path (could be HF cache or local)
                 from huggingface_hub import snapshot_download
                 if os.path.isdir(self.init_model_path):
                     model_cache_path = self.init_model_path
                 else:
-                    # Download/get cached path for HuggingFace model
                     model_cache_path = snapshot_download(self.init_model_path)
 
                 shutil.copytree(model_cache_path, output_dir, dirs_exist_ok=True)
 
-                # Update config
-                input_config_file = os.path.join(model_cache_path, "config.json")
-                output_config_file = os.path.join(output_dir, "config.json")
-
-                with open(input_config_file, "r", encoding="utf-8") as f:
+                # Update config for custom voice
+                config_file = os.path.join(output_dir, "config.json")
+                with open(config_file, "r", encoding="utf-8") as f:
                     config_dict = json.load(f)
 
                 config_dict["tts_model_type"] = "custom_voice"
-
                 talker_config = config_dict.get("talker_config", {})
                 talker_config["spk_id"] = {self.speaker_name: 3000}
                 talker_config["spk_is_dialect"] = {self.speaker_name: False}
                 config_dict["talker_config"] = talker_config
 
-                with open(output_config_file, "w", encoding="utf-8") as f:
+                with open(config_file, "w", encoding="utf-8") as f:
                     json.dump(config_dict, f, indent=2, ensure_ascii=False)
 
                 # Save model weights
@@ -493,24 +375,17 @@ class Qwen3TTSPipeline:
                 }
 
                 # Drop speaker encoder keys
-                drop_prefix = "speaker_encoder"
-                keys_to_drop = [k for k in state_dict.keys() if k.startswith(drop_prefix)]
+                keys_to_drop = [k for k in state_dict if k.startswith("speaker_encoder")]
                 for k in keys_to_drop:
                     del state_dict[k]
 
                 # Add speaker embedding
                 weight = state_dict["talker.model.codec_embedding.weight"]
-                state_dict["talker.model.codec_embedding.weight"][
-                    3000
-                ] = (
-                    target_speaker_embedding[0]
-                    .detach()
-                    .to(weight.device)
-                    .to(weight.dtype)
+                state_dict["talker.model.codec_embedding.weight"][3000] = (
+                    target_speaker_embedding[0].detach().to(weight.device).to(weight.dtype)
                 )
 
-                save_path = os.path.join(output_dir, "model.safetensors")
-                save_file(state_dict, save_path)
+                save_file(state_dict, os.path.join(output_dir, "model.safetensors"))
                 print(f"Saved checkpoint to {output_dir}")
 
         print("\nTraining complete!")
@@ -518,28 +393,11 @@ class Qwen3TTSPipeline:
     def run(self) -> None:
         """Run the complete pipeline."""
         print(f"\n{'='*60}")
-        print("Qwen3-TTS End-to-End Fine-Tuning Pipeline")
+        print("Qwen3-TTS Fine-Tuning Pipeline")
         print(f"{'='*60}\n")
 
-        # Check dependencies
-        self.check_dependencies()
-
-        # Validate inputs
-        audio_files = self.validate_audio_files()
-
-        # Transcribe
-        transcription_results = self.transcribe_with_whisperx(audio_files)
-
-        if not transcription_results:
-            raise ValueError("No transcriptions were generated. Please check your audio files.")
-
-        # Create JSONL
-        self.create_train_jsonl(transcription_results)
-
-        # Prepare data
+        self.load_or_create_jsonl()
         self.prepare_data()
-
-        # Train
         self.train_model()
 
         print(f"\n{'='*60}")
@@ -549,107 +407,31 @@ class Qwen3TTSPipeline:
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Qwen3-TTS End-to-End Fine-Tuning Pipeline"
-    )
+    parser = argparse.ArgumentParser(description="Qwen3-TTS Fine-Tuning Pipeline")
 
-    # Input arguments
-    parser.add_argument(
-        "--audio_dir",
-        type=str,
-        required=True,
-        help="Directory containing WAV files to use for training",
-    )
-    parser.add_argument(
-        "--ref_audio",
-        type=str,
-        required=True,
-        help="Path to reference audio file (WAV)",
-    )
-    parser.add_argument(
-        "--speaker_name",
-        type=str,
-        default="my_speaker",
-        help="Name for the speaker being cloned",
-    )
-
-    # Output arguments
-    parser.add_argument(
-        "--output_dir",
-        type=str,
-        default="./output",
-        help="Directory to save checkpoints and intermediate files",
-    )
-
-    # Model arguments
-    parser.add_argument(
-        "--device",
-        type=str,
-        default="cuda:0",
-        help="Device to use for training",
-    )
-    parser.add_argument(
-        "--tokenizer_model_path",
-        type=str,
-        default="Qwen/Qwen3-TTS-Tokenizer-12Hz",
-        help="Path to tokenizer model",
-    )
-    parser.add_argument(
-        "--init_model_path",
-        type=str,
-        default="Qwen/Qwen3-TTS-12Hz-1.7B-Base",
-        help="Path to initial model for fine-tuning",
-    )
-
-    # Training arguments
-    parser.add_argument(
-        "--batch_size",
-        type=int,
-        default=2,
-        help="Batch size for training",
-    )
-    parser.add_argument(
-        "--lr",
-        type=float,
-        default=2e-5,
-        help="Learning rate",
-    )
-    parser.add_argument(
-        "--num_epochs",
-        type=int,
-        default=3,
-        help="Number of training epochs",
-    )
-
-    # Whisper arguments
-    parser.add_argument(
-        "--whisper_model",
-        type=str,
-        default="large-v3",
-        choices=["tiny", "base", "small", "medium", "large-v2", "large-v3"],
-        help="Whisper model size",
-    )
-    parser.add_argument(
-        "--whisper_compute_type",
-        type=str,
-        default="float16",
-        choices=["float16", "int8", "float32"],
-        help="Whisper compute type",
-    )
-    parser.add_argument(
-        "--language",
-        type=str,
-        default="auto",
-        help="Language code (e.g., 'en', 'zh', 'es') or 'auto' for auto-detection",
-    )
+    parser.add_argument("--audio_dir", type=str, help="Directory containing WAV files")
+    parser.add_argument("--jsonl", type=str, help="Pre-built train_raw.jsonl (preferred)")
+    parser.add_argument("--ref_audio", type=str, required=True, help="Reference audio (WAV)")
+    parser.add_argument("--speaker_name", type=str, default="my_speaker", help="Speaker name")
+    parser.add_argument("--output_dir", type=str, default="./output", help="Output directory")
+    parser.add_argument("--device", type=str, default="cuda:0", help="Device")
+    parser.add_argument("--tokenizer_model_path", type=str, default="Qwen/Qwen3-TTS-Tokenizer-12Hz")
+    parser.add_argument("--init_model_path", type=str, default="Qwen/Qwen3-TTS-12Hz-1.7B-Base")
+    parser.add_argument("--batch_size", type=int, default=2, help="Batch size")
+    parser.add_argument("--lr", type=float, default=2e-5, help="Learning rate")
+    parser.add_argument("--num_epochs", type=int, default=3, help="Epochs")
+    parser.add_argument("--language", type=str, default="en", help="Language code")
 
     args = parser.parse_args()
 
-    # Run pipeline
+    if not args.jsonl and not args.audio_dir:
+        parser.error("Either --jsonl or --audio_dir is required")
+
     pipeline = Qwen3TTSPipeline(
-        audio_dir=args.audio_dir,
         ref_audio=args.ref_audio,
         speaker_name=args.speaker_name,
+        audio_dir=args.audio_dir,
+        jsonl=args.jsonl,
         output_dir=args.output_dir,
         device=args.device,
         tokenizer_model_path=args.tokenizer_model_path,
@@ -657,8 +439,6 @@ def main():
         batch_size=args.batch_size,
         lr=args.lr,
         num_epochs=args.num_epochs,
-        whisper_model=args.whisper_model,
-        whisper_compute_type=args.whisper_compute_type,
         language=args.language,
     )
 
